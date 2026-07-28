@@ -74,8 +74,20 @@ export default function App() {
       const m = await importarMatriz(arquivo);
       setMatriz(m);
     } catch (err) {
-      if (err instanceof MatrizImportError) setErroMatriz(err.message);
-      else setErroMatriz("Erro inesperado ao ler a planilha: " + (err as Error).message);
+      if (err instanceof MatrizImportError) {
+        setErroMatriz(err.message);
+      } else {
+        setErroMatriz(
+          "Não consegui ler este arquivo como planilha Excel (erro técnico: " +
+            (err as Error).message +
+            "). Isso costuma acontecer quando o arquivo não está num .xlsx " +
+            "válido — por exemplo, é um .xls antigo salvo com extensão " +
+            "errada, tem proteção de senha, ou foi corrompido na cópia. " +
+            "Tente abrir a planilha no Excel e usar 'Arquivo > Salvar Como > " +
+            "Pasta de Trabalho do Excel (*.xlsx)' com um nome novo, depois " +
+            "importe esse arquivo novo."
+        );
+      }
     }
   }
 
@@ -98,24 +110,44 @@ export default function App() {
           `Gerando embeddings de ${chunks.length} trechos de ${arquivo.name}...`
         );
         const chunksComEmbedding = [];
+        let trechosIgnorados = 0;
         for (let i = 0; i < chunks.length; i++) {
           const c = chunks[i];
-          const embedding = await gerarEmbedding(cfg, c.texto);
-          chunksComEmbedding.push({
-            id: novoId(),
-            propostaId,
-            arquivoOrigem: arquivo.name,
-            pagina: c.pagina,
-            texto: c.texto,
-            embedding,
-          });
+          try {
+            const embedding = await gerarEmbedding(cfg, c.texto);
+            chunksComEmbedding.push({
+              id: novoId(),
+              propostaId,
+              arquivoOrigem: arquivo.name,
+              pagina: c.pagina,
+              texto: c.texto,
+              embedding,
+            });
+          } catch (err) {
+            // Não aborta a indexação inteira por causa de um trecho
+            // problemático (ex.: texto grande demais para o modelo) — pula
+            // esse trecho específico e segue com o restante.
+            trechosIgnorados++;
+            console.warn(
+              `Trecho ${i + 1} de ${arquivo.name} ignorado (erro ao gerar embedding):`,
+              err
+            );
+          }
           if (i % 5 === 0) {
             setProgressoIndexacao(
-              `Gerando embeddings de ${arquivo.name}: ${i + 1}/${chunks.length}`
+              `Gerando embeddings de ${arquivo.name}: ${i + 1}/${chunks.length}` +
+                (trechosIgnorados > 0 ? ` (${trechosIgnorados} trecho(s) ignorado(s))` : "")
             );
           }
         }
         await salvarChunks(chunksComEmbedding);
+        if (trechosIgnorados > 0) {
+          setProgressoIndexacao(
+            `Atenção: ${trechosIgnorados} trecho(s) de ${arquivo.name} não puderam ` +
+              "ser indexados (provavelmente texto grande demais) e foram ignorados. " +
+              "A avaliação pode ficar incompleta para partes desse documento."
+          );
+        }
       }
       await encerrarOcr();
       setProgressoIndexacao("Indexação concluída.");
