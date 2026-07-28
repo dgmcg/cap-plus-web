@@ -16,15 +16,29 @@ import {
 } from "docx";
 import type { AvaliacaoCriterio, CriterioAvaliacao, SessaoAvaliacao } from "../types";
 
+// O formato do Word (.docx) é, por baixo dos panos, um arquivo XML. O
+// padrão XML proíbe certos caracteres de controle (fora tab/quebra de
+// linha/retorno de carro) — e texto vindo de OCR de PDF escaneado às vezes
+// contém "lixo" invisível desse tipo. Sem essa limpeza, o Word recusa abrir
+// o arquivo com um erro apontando pra uma posição dentro do document.xml.
+function limparTextoParaXml(texto: string): string {
+  // eslint-disable-next-line no-control-regex
+  return texto.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
+}
+
 function celula(texto: string, opts?: { negrito?: boolean; largura?: number }): TableCell {
   return new TableCell({
     width: opts?.largura ? { size: opts.largura, type: WidthType.PERCENTAGE } : undefined,
     children: [
       new Paragraph({
-        children: [new TextRun({ text: texto, bold: opts?.negrito ?? false })],
+        children: [new TextRun({ text: limparTextoParaXml(texto), bold: opts?.negrito ?? false })],
       }),
     ],
   });
+}
+
+function paragrafo(texto: string): Paragraph {
+  return new Paragraph({ text: limparTextoParaXml(texto) });
 }
 
 export async function gerarRelatorioDocx(
@@ -91,10 +105,10 @@ export async function gerarRelatorioDocx(
             alignment: AlignmentType.CENTER,
           }),
           new Paragraph({ text: "" }),
-          new Paragraph({ text: `Proposta avaliada: ${nomeProposta}` }),
-          new Paragraph({ text: `Matriz utilizada: ${sessao.matrizNomeArquivo}` }),
-          new Paragraph({ text: `Avaliador: ${sessao.avaliadorNome}` }),
-          new Paragraph({ text: `Modelo de IA utilizado (apoio): ${sessao.modeloIA}` }),
+          paragrafo(`Proposta avaliada: ${nomeProposta}`),
+          paragrafo(`Matriz utilizada: ${sessao.matrizNomeArquivo}`),
+          paragrafo(`Avaliador: ${sessao.avaliadorNome}`),
+          paragrafo(`Modelo de IA utilizado (apoio): ${sessao.modeloIA}`),
           new Paragraph({
             text: `Data de emissão: ${new Date().toLocaleDateString("pt-BR")}`,
           }),
