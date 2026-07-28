@@ -98,27 +98,48 @@ export async function extrairTextoPDF(
   return resultado;
 }
 
-/** Quebra o texto de todas as páginas em chunks para embedding/RAG. */
+/**
+ * Quebra o texto de todas as páginas em chunks para embedding/RAG.
+ *
+ * Usa contagem de CARACTERES, não de palavras — importante porque o texto
+ * extraído de tabelas em PDF às vezes vem "colado" sem espaços entre
+ * células, o que faria uma divisão por palavras gerar um único "token"
+ * gigante e estourar o limite de contexto do modelo de embedding. Aqui o
+ * tamanho do chunk nunca ultrapassa `tamanhoAlvoChars`, mesmo sem espaços.
+ */
 export function dividirEmChunks(
   paginas: PaginaExtraida[],
-  tamanhoAlvo = 900,
-  sobreposicao = 150
+  tamanhoAlvoChars = 3200,
+  sobreposicaoChars = 400
 ): { pagina: number; texto: string }[] {
   const chunks: { pagina: number; texto: string }[] = [];
 
   for (const pagina of paginas) {
-    const palavras = pagina.texto.split(/\s+/).filter(Boolean);
-    if (palavras.length === 0) continue;
+    const texto = pagina.texto.trim();
+    if (texto.length === 0) continue;
 
     let inicio = 0;
-    while (inicio < palavras.length) {
-      const fim = Math.min(inicio + tamanhoAlvo, palavras.length);
-      const trecho = palavras.slice(inicio, fim).join(" ");
-      if (trecho.trim().length > 0) {
+    while (inicio < texto.length) {
+      let fim = Math.min(inicio + tamanhoAlvoChars, texto.length);
+
+      // Se não chegamos ao fim do texto, tenta cortar num espaço em vez de
+      // no meio de uma palavra — procura o último espaço dentro da janela.
+      if (fim < texto.length) {
+        const ultimoEspaco = texto.lastIndexOf(" ", fim);
+        // Só usa o espaço se ele não estiver perto demais do início (senão
+        // o chunk ficaria minúsculo); caso contrário, aceita o corte "seco".
+        if (ultimoEspaco > inicio + tamanhoAlvoChars * 0.5) {
+          fim = ultimoEspaco;
+        }
+      }
+
+      const trecho = texto.slice(inicio, fim).trim();
+      if (trecho.length > 0) {
         chunks.push({ pagina: pagina.pagina, texto: trecho });
       }
-      if (fim >= palavras.length) break;
-      inicio = fim - sobreposicao;
+
+      if (fim >= texto.length) break;
+      inicio = Math.max(fim - sobreposicaoChars, inicio + 1);
     }
   }
 
