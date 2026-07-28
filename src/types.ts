@@ -68,3 +68,21 @@ export interface ConfiguracaoOllama {
   modeloChat: string;   // ex: qwen2.5:7b
   modeloEmbedding: string; // ex: nomic-embed-text
 }
+
+export type StatusConvergencia = "convergente" | "inconsistente" | "nao_verificavel";
+
+export interface ItemConvergenciaEdital {
+  id: string;
+  trechoEdital: string;
+  arquivoEdital: string;
+  paginaEdital: number;
+  status: StatusConvergencia;
+  explicacao: string;
+  evidenciasProposta: EvidenciaEncontrada[];
+}
+
+export interface AnaliseConvergenciaEdital {
+  editalNomeArquivos: string[];
+  itens: ItemConvergenciaEdital[];
+  geradoEm: string; // ISO date
+}

@@ -214,3 +214,28 @@ button:disabled {
 .tabela-revisao input[type="number"] {
   width: 70px;
 }
+
+.etiqueta-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.etiqueta-convergente {
+  background: #e3f3ea;
+  color: var(--verde-ok);
+}
+
+.etiqueta-inconsistente {
+  background: #fbeaea;
+  color: var(--vermelho-erro);
+}
+
+.etiqueta-nao_verificavel {
+  background: #eef1f3;
+  color: #666;
+}

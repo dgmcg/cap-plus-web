@@ -1,6 +1,7 @@
 import { useState } from "react";
 import "./App.css";
 import type {
+  AnaliseConvergenciaEdital,
   AvaliacaoCriterio,
   ConfiguracaoOllama,
   MatrizAvaliacao,
@@ -11,7 +12,13 @@ import { dividirEmChunks, encerrarOcr, extrairTextoPDF } from "./lib/pdfExtract"
 import { gerarEmbeddingComDivisao, testarConexao } from "./lib/ollama";
 import { salvarChunks } from "./lib/vectorStore";
 import { avaliarCriterios } from "./lib/avaliacaoEngine";
+import { analisarConvergenciaEdital } from "./lib/convergenciaEngine";
 import { baixarBlob, gerarRelatorioDocx } from "./lib/docxExport";
+import {
+  gerarJsonAvaliacao,
+  importarAvaliacaoJson,
+  ImportacaoAvaliacaoError,
+} from "./lib/exportImport";
 
 type Etapa = "config" | "matriz" | "proposta" | "avaliando" | "revisao";
 
@@ -23,6 +30,12 @@ const CONFIG_PADRAO: ConfiguracaoOllama = {
 
 function novoId() {
   return crypto.randomUUID();
+}
+
+interface TrechoEdital {
+  arquivoOrigem: string;
+  pagina: number;
+  texto: string;
 }
 
 export default function App() {
@@ -38,13 +51,25 @@ export default function App() {
 
   const [nomeProposta, setNomeProposta] = useState("");
   const [propostaId] = useState(novoId);
-  const [avaliadorNome, setAvaliadorNome] = useState("");
   const [indexando, setIndexando] = useState(false);
   const [progressoIndexacao, setProgressoIndexacao] = useState("");
   const [prontoParaAvaliar, setProntoParaAvaliar] = useState(false);
 
+  // Edital (opcional) — usado só pra análise de convergência geral, não
+  // entra na busca de evidências por critério.
+  const [trechosEdital, setTrechosEdital] = useState<TrechoEdital[]>([]);
+  const [nomesArquivosEdital, setNomesArquivosEdital] = useState<string[]>([]);
+  const [processandoEdital, setProcessandoEdital] = useState(false);
+  const [progressoEdital, setProgressoEdital] = useState("");
+
   const [progressoAvaliacao, setProgressoAvaliacao] = useState("");
   const [sessao, setSessao] = useState<SessaoAvaliacao | null>(null);
+  const [convergencia, setConvergencia] = useState<AnaliseConvergenciaEdital | null>(null);
+
+  // Importação de uma avaliação já feita por outra pessoa (JSON) — permite
+  // pular direto pra revisão, sem precisar de Ollama conectado.
+  const [erroImportacaoJson, setErroImportacaoJson] = useState<string | null>(null);
+  const [importando, setImportando] = useState(false);
 
   async function handleTestarConexao() {
     setTestando(true);
@@ -164,16 +189,50 @@ export default function App() {
     }
   }
 
+  async function handleProcessarEdital(arquivos: FileList) {
+    setProcessandoEdital(true);
+    try {
+      const novosTrechos: TrechoEdital[] = [];
+      const novosNomes: string[] = [];
+      let arquivoIdx = 0;
+      for (const arquivo of Array.from(arquivos)) {
+        arquivoIdx++;
+        novosNomes.push(arquivo.name);
+        const paginas = await extrairTextoPDF(arquivo, (p) => {
+          setProgressoEdital(
+            `Arquivo ${arquivoIdx}/${arquivos.length} (${arquivo.name}) — ` +
+              `${p.etapa === "ocr" ? "OCR" : "lendo texto"} página ${p.paginaAtual}/${p.totalPaginas}`
+          );
+        });
+        const chunks = dividirEmChunks(paginas);
+        for (const c of chunks) {
+          novosTrechos.push({ arquivoOrigem: arquivo.name, pagina: c.pagina, texto: c.texto });
+        }
+      }
+      await encerrarOcr();
+      setTrechosEdital(novosTrechos);
+      setNomesArquivosEdital(novosNomes);
+      setProgressoEdital(
+        `Edital processado: ${novosTrechos.length} trecho(s) prontos para análise de convergência.`
+      );
+    } catch (err) {
+      setProgressoEdital("Erro ao processar o Edital: " + (err as Error).message);
+    } finally {
+      setProcessandoEdital(false);
+    }
+  }
+
   async function handleAvaliar() {
     if (!matriz) return;
     setEtapa("avaliando");
+
     const avaliacoes: AvaliacaoCriterio[] = await avaliarCriterios(
       cfg,
       propostaId,
       matriz.criterios,
       (p) =>
         setProgressoAvaliacao(
-          `Critério ${p.criterioAtual}/${p.totalCriterios}: ${p.descricaoCriterio}`
+          `Avaliando critérios — ${p.criterioAtual}/${p.totalCriterios}: ${p.descricaoCriterio}`
         )
     );
 
@@ -181,12 +240,28 @@ export default function App() {
       id: novoId(),
       propostaId,
       matrizNomeArquivo: matriz.nomeArquivo,
-      avaliadorNome,
+      avaliadorNome: "",
       modeloIA: cfg.modeloChat,
       avaliacoes,
       criadoEm: new Date().toISOString(),
       atualizadoEm: new Date().toISOString(),
     });
+
+    if (trechosEdital.length > 0) {
+      const itens = await analisarConvergenciaEdital(cfg, propostaId, trechosEdital, (p) =>
+        setProgressoAvaliacao(
+          `Analisando convergência com o Edital — trecho ${p.itemAtual}/${p.totalItens}`
+        )
+      );
+      setConvergencia({
+        editalNomeArquivos: nomesArquivosEdital,
+        itens,
+        geradoEm: new Date().toISOString(),
+      });
+    } else {
+      setConvergencia(null);
+    }
+
     setEtapa("revisao");
   }
 
@@ -203,13 +278,52 @@ export default function App() {
     });
   }
 
-  async function handleExportar() {
+  function atualizarAvaliadorNome(nome: string) {
+    setSessao((prev) => (prev ? { ...prev, avaliadorNome: nome } : prev));
+  }
+
+  async function handleExportarDocx() {
     if (!sessao || !matriz) return;
-    const blob = await gerarRelatorioDocx(sessao, matriz.criterios, nomeProposta);
+    const blob = await gerarRelatorioDocx(
+      sessao,
+      matriz.criterios,
+      nomeProposta,
+      convergencia ?? undefined
+    );
     const nomeArquivo = `Avaliacao_${nomeProposta.replace(/\s+/g, "_")}_${new Date()
       .toISOString()
       .slice(0, 10)}.docx`;
     baixarBlob(blob, nomeArquivo);
+  }
+
+  function handleExportarJson() {
+    if (!sessao || !matriz) return;
+    const blob = gerarJsonAvaliacao(nomeProposta, matriz, sessao, convergencia ?? undefined);
+    const nomeArquivo = `Avaliacao_IA_${nomeProposta.replace(/\s+/g, "_")}_${new Date()
+      .toISOString()
+      .slice(0, 10)}.json`;
+    baixarBlob(blob, nomeArquivo);
+  }
+
+  async function handleImportarAvaliacao(arquivo: File) {
+    setImportando(true);
+    setErroImportacaoJson(null);
+    try {
+      const dados = await importarAvaliacaoJson(arquivo);
+      setMatriz(dados.matriz);
+      setSessao(dados.sessao);
+      setNomeProposta(dados.nomeProposta);
+      setConvergencia(dados.convergenciaEdital ?? null);
+      setEtapa("revisao");
+    } catch (err) {
+      if (err instanceof ImportacaoAvaliacaoError) {
+        setErroImportacaoJson(err.message);
+      } else {
+        setErroImportacaoJson("Erro inesperado ao importar: " + (err as Error).message);
+      }
+    } finally {
+      setImportando(false);
+    }
   }
 
   return (
@@ -234,49 +348,68 @@ export default function App() {
       </nav>
 
       {etapa === "config" && (
-        <section className="cartao">
-          <h2>1. Conexão com o Ollama local</h2>
-          <label>
-            Endereço do Ollama
-            <input
-              value={cfg.baseUrl}
-              onChange={(e) => setCfg({ ...cfg, baseUrl: e.target.value })}
-            />
-          </label>
-          <label>
-            Modelo de chat (avaliação)
-            <input
-              value={cfg.modeloChat}
-              onChange={(e) => setCfg({ ...cfg, modeloChat: e.target.value })}
-            />
-          </label>
-          <label>
-            Modelo de embedding
-            <input
-              value={cfg.modeloEmbedding}
-              onChange={(e) => setCfg({ ...cfg, modeloEmbedding: e.target.value })}
-            />
-          </label>
-          <button onClick={handleTestarConexao} disabled={testando}>
-            {testando ? "Testando..." : "Testar conexão"}
-          </button>
-          {statusConexao && (
-            <p className={statusConexao.ok ? "status-ok" : "status-erro"}>
-              {statusConexao.mensagem}
+        <>
+          <section className="cartao">
+            <h2>1. Conexão com o Ollama local</h2>
+            <label>
+              Endereço do Ollama
+              <input
+                value={cfg.baseUrl}
+                onChange={(e) => setCfg({ ...cfg, baseUrl: e.target.value })}
+              />
+            </label>
+            <label>
+              Modelo de chat (avaliação)
+              <input
+                value={cfg.modeloChat}
+                onChange={(e) => setCfg({ ...cfg, modeloChat: e.target.value })}
+              />
+            </label>
+            <label>
+              Modelo de embedding
+              <input
+                value={cfg.modeloEmbedding}
+                onChange={(e) => setCfg({ ...cfg, modeloEmbedding: e.target.value })}
+              />
+            </label>
+            <button onClick={handleTestarConexao} disabled={testando}>
+              {testando ? "Testando..." : "Testar conexão"}
+            </button>
+            {statusConexao && (
+              <p className={statusConexao.ok ? "status-ok" : "status-erro"}>
+                {statusConexao.mensagem}
+              </p>
+            )}
+            <p className="ajuda">
+              Se der erro de conexão, confirme que o Ollama está aberto e que a
+              variável <code>OLLAMA_ORIGINS</code> inclui o endereço desta página.
             </p>
-          )}
-          <p className="ajuda">
-            Se der erro de conexão, confirme que o Ollama está aberto e que a
-            variável <code>OLLAMA_ORIGINS</code> inclui o endereço desta página.
-          </p>
-          <button
-            className="botao-primario"
-            onClick={() => setEtapa("matriz")}
-            disabled={!statusConexao?.ok}
-          >
-            Avançar
-          </button>
-        </section>
+            <button
+              className="botao-primario"
+              onClick={() => setEtapa("matriz")}
+              disabled={!statusConexao?.ok}
+            >
+              Avançar
+            </button>
+          </section>
+
+          <section className="cartao" style={{ marginTop: 16 }}>
+            <h2>Já tem uma avaliação pronta?</h2>
+            <p className="ajuda">
+              Se outra pessoa já rodou a avaliação com IA e te enviou o arquivo{" "}
+              <code>.json</code> exportado, importe aqui para ir direto pra revisão —
+              não precisa estar conectado ao Ollama para revisar.
+            </p>
+            <input
+              type="file"
+              accept=".json"
+              disabled={importando}
+              onChange={(e) => e.target.files?.[0] && handleImportarAvaliacao(e.target.files[0])}
+            />
+            {importando && <p className="status-progresso">Importando...</p>}
+            {erroImportacaoJson && <p className="status-erro">{erroImportacaoJson}</p>}
+          </section>
+        </>
       )}
 
       {etapa === "matriz" && (
@@ -307,42 +440,61 @@ export default function App() {
       )}
 
       {etapa === "proposta" && (
-        <section className="cartao">
-          <h2>3. Importar proposta técnica (PDF)</h2>
-          <label>
-            Nome da OSS / proponente
-            <input value={nomeProposta} onChange={(e) => setNomeProposta(e.target.value)} />
-          </label>
-          <label>
-            Seu nome (avaliador)
-            <input value={avaliadorNome} onChange={(e) => setAvaliadorNome(e.target.value)} />
-          </label>
-          <input
-            type="file"
-            accept=".pdf"
-            multiple
-            onChange={(e) => e.target.files && handleIndexarProposta(e.target.files)}
-          />
-          {indexando && <p className="status-progresso">{progressoIndexacao}</p>}
-          {!indexando && progressoIndexacao && (
-            <p className="status-ok">{progressoIndexacao}</p>
-          )}
-          <div className="botoes">
+        <>
+          <section className="cartao">
+            <h2>3. Importar proposta técnica (PDF)</h2>
+            <label>
+              Nome da OSS / proponente
+              <input value={nomeProposta} onChange={(e) => setNomeProposta(e.target.value)} />
+            </label>
+            <input
+              type="file"
+              accept=".pdf"
+              multiple
+              onChange={(e) => e.target.files && handleIndexarProposta(e.target.files)}
+            />
+            {indexando && <p className="status-progresso">{progressoIndexacao}</p>}
+            {!indexando && progressoIndexacao && (
+              <p className="status-ok">{progressoIndexacao}</p>
+            )}
+          </section>
+
+          <section className="cartao" style={{ marginTop: 16 }}>
+            <h2>3b. Edital (opcional) — análise de convergência</h2>
+            <p className="ajuda">
+              Se anexar o Edital, a IA também vai varrer o texto dele e apontar, num
+              âmbito geral, se a proposta está em conformidade ou se há
+              inconsistências — separado da pontuação por critério da matriz.
+            </p>
+            <input
+              type="file"
+              accept=".pdf"
+              multiple
+              disabled={processandoEdital}
+              onChange={(e) => e.target.files && handleProcessarEdital(e.target.files)}
+            />
+            {processandoEdital && <p className="status-progresso">{progressoEdital}</p>}
+            {!processandoEdital && progressoEdital && (
+              <p className="status-ok">{progressoEdital}</p>
+            )}
+          </section>
+
+          <div className="botoes" style={{ marginTop: 16 }}>
             <button onClick={() => setEtapa("matriz")}>Voltar</button>
             <button
               className="botao-primario"
               onClick={handleAvaliar}
-              disabled={!prontoParaAvaliar || !nomeProposta || indexando}
+              disabled={!prontoParaAvaliar || !nomeProposta || indexando || processandoEdital}
             >
               Rodar avaliação com IA
             </button>
           </div>
-        </section>
+        </>
       )}
 
       {etapa === "avaliando" && (
         <section className="cartao">
-          <h2>Avaliando critérios...</h2>
+          <h2>Avaliando...</h2>
           <p className="status-progresso">{progressoAvaliacao}</p>
         </section>
       )}
@@ -350,6 +502,15 @@ export default function App() {
       {etapa === "revisao" && sessao && matriz && (
         <section className="cartao cartao-larga">
           <h2>4. Revisão das notas sugeridas pela IA</h2>
+
+          <label>
+            Nome do avaliador (quem está revisando agora)
+            <input
+              value={sessao.avaliadorNome}
+              onChange={(e) => atualizarAvaliadorNome(e.target.value)}
+            />
+          </label>
+
           <table className="tabela-revisao">
             <thead>
               <tr>
@@ -402,11 +563,52 @@ export default function App() {
               })}
             </tbody>
           </table>
+
+          {convergencia && (
+            <div style={{ marginTop: 28 }}>
+              <h2>Análise de Convergência: Edital x Proposta</h2>
+              <p className="ajuda">
+                Edital(is): {convergencia.editalNomeArquivos.join(", ")} — verificação
+                automática de conformidade geral, complementar à tabela de critérios acima.
+              </p>
+              <table className="tabela-revisao">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Trecho do Edital</th>
+                    <th>Análise da IA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {convergencia.itens.map((item) => (
+                    <tr key={item.id}>
+                      <td>
+                        <span className={`etiqueta-status etiqueta-${item.status}`}>
+                          {rotuloStatusConvergencia(item.status)}
+                        </span>
+                        <br />
+                        <small>
+                          {item.arquivoEdital}, p. {item.paginaEdital}
+                        </small>
+                      </td>
+                      <td className="celula-justificativa">
+                        {item.trechoEdital.slice(0, 300)}
+                        {item.trechoEdital.length > 300 ? "..." : ""}
+                      </td>
+                      <td className="celula-justificativa">{item.explicacao}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           <div className="botoes">
             <button onClick={() => setEtapa("proposta")}>Voltar</button>
-            <button className="botao-primario" onClick={handleExportar}>
+            <button className="botao-primario" onClick={handleExportarDocx}>
               Exportar relatório (.docx)
             </button>
+            <button onClick={handleExportarJson}>Exportar avaliação (.json)</button>
           </div>
         </section>
       )}
@@ -426,5 +628,16 @@ function rotuloEtapa(e: Etapa): string {
       return "Avaliação";
     case "revisao":
       return "Revisão";
+  }
+}
+
+function rotuloStatusConvergencia(status: "convergente" | "inconsistente" | "nao_verificavel") {
+  switch (status) {
+    case "convergente":
+      return "Convergente";
+    case "inconsistente":
+      return "Inconsistente";
+    case "nao_verificavel":
+      return "Não verificável";
   }
 }

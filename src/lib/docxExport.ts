@@ -14,7 +14,13 @@ import {
   TextRun,
   WidthType,
 } from "docx";
-import type { AvaliacaoCriterio, CriterioAvaliacao, SessaoAvaliacao } from "../types";
+import type {
+  AnaliseConvergenciaEdital,
+  AvaliacaoCriterio,
+  CriterioAvaliacao,
+  SessaoAvaliacao,
+  StatusConvergencia,
+} from "../types";
 
 // O formato do Word (.docx) é, por baixo dos panos, um arquivo XML. O
 // padrão XML proíbe certos caracteres de controle (fora tab/quebra de
@@ -41,10 +47,70 @@ function paragrafo(texto: string): Paragraph {
   return new Paragraph({ text: limparTextoParaXml(texto) });
 }
 
+const ROTULO_STATUS: Record<StatusConvergencia, string> = {
+  convergente: "Convergente",
+  inconsistente: "Inconsistente",
+  nao_verificavel: "Não verificável",
+};
+
+function construirSecaoConvergencia(convergencia: AnaliseConvergenciaEdital): Paragraph[] {
+  const paragrafos: Paragraph[] = [
+    new Paragraph({ text: "", spacing: { before: 300 } }),
+    new Paragraph({
+      text: "Análise de Convergência: Edital x Proposta",
+      heading: HeadingLevel.HEADING_1,
+    }),
+    paragrafo(
+      "Verificação automática, em âmbito geral, de aderência da proposta ao que o " +
+        `Edital (${convergencia.editalNomeArquivos.join(", ")}) exige — não substitui ` +
+        "a avaliação por critério da matriz, é uma checagem complementar de " +
+        "consistência. Revise cada apontamento antes de considerá-lo definitivo."
+    ),
+    new Paragraph({ text: "" }),
+  ];
+
+  const inconsistentes = convergencia.itens.filter((i) => i.status === "inconsistente");
+  const naoVerificaveis = convergencia.itens.filter((i) => i.status === "nao_verificavel");
+  const convergentes = convergencia.itens.filter((i) => i.status === "convergente");
+
+  paragrafos.push(
+    paragrafo(
+      `Resumo: ${convergentes.length} trecho(s) convergente(s), ` +
+        `${inconsistentes.length} inconsistência(s) apontada(s), ` +
+        `${naoVerificaveis.length} trecho(s) não verificável(is).`
+    ),
+    new Paragraph({ text: "" })
+  );
+
+  if (inconsistentes.length > 0) {
+    paragrafos.push(
+      new Paragraph({ text: "Inconsistências apontadas", heading: HeadingLevel.HEADING_2 })
+    );
+    for (const item of inconsistentes) {
+      paragrafos.push(
+        new Paragraph({
+          children: [
+            new TextRun({
+              text: `[${ROTULO_STATUS[item.status]}] Edital (${item.arquivoEdital}, p. ${item.paginaEdital}): `,
+              bold: true,
+            }),
+            new TextRun({ text: limparTextoParaXml(item.trechoEdital.slice(0, 400)) }),
+          ],
+        }),
+        paragrafo(`Análise: ${item.explicacao}`),
+        new Paragraph({ text: "" })
+      );
+    }
+  }
+
+  return paragrafos;
+}
+
 export async function gerarRelatorioDocx(
   sessao: SessaoAvaliacao,
   criterios: CriterioAvaliacao[],
-  nomeProposta: string
+  nomeProposta: string,
+  convergencia?: AnaliseConvergenciaEdital
 ): Promise<Blob> {
   const porCriterio = new Map<string, AvaliacaoCriterio>();
   for (const a of sessao.avaliacoes) porCriterio.set(a.criterioId, a);
@@ -128,6 +194,7 @@ export async function gerarRelatorioDocx(
               }),
             ],
           }),
+          ...(convergencia ? construirSecaoConvergencia(convergencia) : []),
         ],
       },
     ],
