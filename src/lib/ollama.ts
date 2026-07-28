@@ -70,6 +70,52 @@ export interface RespostaChat {
 }
 
 /**
+ * Gera o embedding de um texto, dividindo-o recursivamente ao meio se o
+ * Ollama recusar por o texto ser grande demais para o contexto do modelo
+ * (em vez de simplesmente desistir e perder aquele trecho da proposta).
+ * Só desiste de verdade se um pedaço já pequeno (menos de `tamanhoMinimo`
+ * caracteres) ainda assim falhar.
+ */
+export async function gerarEmbeddingComDivisao(
+  cfg: ConfiguracaoOllama,
+  texto: string,
+  profundidadeMaxima = 4,
+  tamanhoMinimo = 300
+): Promise<{ texto: string; embedding: number[] }[]> {
+  try {
+    const embedding = await gerarEmbedding(cfg, texto);
+    return [{ texto, embedding }];
+  } catch (err) {
+    const excedeuContexto =
+      err instanceof OllamaError &&
+      /context length|context window|exceeds/i.test(err.message);
+
+    if (!excedeuContexto || profundidadeMaxima <= 0 || texto.length < tamanhoMinimo) {
+      throw err;
+    }
+
+    const meio = Math.floor(texto.length / 2);
+    let corte = texto.lastIndexOf(" ", meio);
+    if (corte < texto.length * 0.2) corte = meio; // sem espaço bom por perto; corta seco
+    const parte1 = texto.slice(0, corte).trim();
+    const parte2 = texto.slice(corte).trim();
+
+    const resultados: { texto: string; embedding: number[] }[] = [];
+    if (parte1) {
+      resultados.push(
+        ...(await gerarEmbeddingComDivisao(cfg, parte1, profundidadeMaxima - 1, tamanhoMinimo))
+      );
+    }
+    if (parte2) {
+      resultados.push(
+        ...(await gerarEmbeddingComDivisao(cfg, parte2, profundidadeMaxima - 1, tamanhoMinimo))
+      );
+    }
+    return resultados;
+  }
+}
+
+/**
  * Envia um prompt de avaliação (com contexto/evidências já embutido) ao
  * modelo de chat e retorna a resposta bruta em texto.
  */
