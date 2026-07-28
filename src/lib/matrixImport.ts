@@ -5,11 +5,36 @@
 import * as XLSX from "xlsx";
 import type { CriterioAvaliacao, MatrizAvaliacao } from "../types";
 
-// Aceita variações comuns de cabeçalho (case-insensitive).
+// Aceita variações comuns de cabeçalho (case-insensitive). Ordem importa:
+// candidatos mais específicos vêm primeiro, para matrizes que têm várias
+// colunas parecidas (ex.: "Critério Principal" vs "Parâmetros de Avaliação").
 const MAPA_COLUNAS: Record<string, string[]> = {
-  grupo: ["grupo", "dimensão", "dimensao", "categoria"],
-  descricao: ["critério", "criterio", "descrição", "descricao", "item"],
-  pontuacaoMaxima: ["pontuação máxima", "pontuacao maxima", "pontos", "peso", "nota máxima"],
+  grupo: [
+    "critério principal",
+    "criterio principal",
+    "grupo",
+    "dimensão",
+    "dimensao",
+    "categoria",
+  ],
+  descricao: [
+    "parâmetros de avaliação",
+    "parametros de avaliacao",
+    "parâmetro de avaliação",
+    "parametro de avaliacao",
+    "descrição",
+    "descricao",
+    "critério",
+    "criterio",
+    "item",
+  ],
+  pontuacaoMaxima: [
+    "pontuação máxima",
+    "pontuacao maxima",
+    "pontos",
+    "peso",
+    "nota máxima",
+  ],
 };
 
 function normalizarCabecalho(h: string): string {
@@ -21,14 +46,34 @@ function normalizarCabecalho(h: string): string {
     .replace(/[\u0300-\u036f]/g, ""); // remove acentos p/ comparação
 }
 
+// Converte uma linha da planilha (que pode ter "buracos" — posições sem
+// nenhuma célula, não a mesma coisa que uma célula vazia — quando a
+// planilha tem células mescladas ou puladas) numa lista densa de strings,
+// sem buracos. Usar .map() diretamente aqui quebraria, porque .map() pula
+// buracos em arrays esparsos e deixa a posição como undefined no resultado.
+function paraLinhaDeStrings(linha: unknown[]): string[] {
+  const resultado: string[] = [];
+  for (let i = 0; i < linha.length; i++) {
+    resultado.push(String(linha[i] ?? ""));
+  }
+  return resultado;
+}
+
 function encontrarColuna(
   cabecalhos: string[],
-  candidatos: string[]
+  candidatos: string[],
+  ignorarIndice?: number
 ): number {
   const normalizados = cabecalhos.map(normalizarCabecalho);
   for (const candidato of candidatos) {
     const alvo = normalizarCabecalho(candidato);
-    const idx = normalizados.findIndex((h) => h.includes(alvo) || alvo.includes(h));
+    const idx = normalizados.findIndex((h, i) => {
+      if (i === ignorarIndice || h.length === 0) return false;
+      // Casamento por conter o texto num sentido ou no outro, mas evitando
+      // que células vazias ou cabeçalhos muito curtos deem "match" trivial
+      // (ex.: um cabeçalho de 1 letra não deve "conter" um alvo grande).
+      return h.includes(alvo) || (h.length >= 3 && alvo.includes(h));
+    });
     if (idx !== -1) return idx;
   }
   return -1;
@@ -56,19 +101,32 @@ function localizarCabecalho(linhas: unknown[][]): CabecalhoEncontrado | null {
   const limite = Math.min(linhas.length, MAX_LINHAS_PARA_PROCURAR_CABECALHO);
 
   for (let i = 0; i < limite; i++) {
-    const candidatos = (linhas[i] as unknown[]).map((c) => String(c ?? ""));
+    const candidatos = paraLinhaDeStrings(linhas[i] as unknown[]);
     const idxDescricao = encontrarColuna(candidatos, MAPA_COLUNAS.descricao);
     const idxPontuacao = encontrarColuna(candidatos, MAPA_COLUNAS.pontuacaoMaxima);
 
     // Só consideramos que achamos o cabeçalho se AMBAS as colunas
     // essenciais aparecerem na mesma linha.
     if (idxDescricao !== -1 && idxPontuacao !== -1) {
-      const idxGrupo = encontrarColuna(candidatos, MAPA_COLUNAS.grupo);
+      // Evita que "grupo" aponte pra mesma coluna já usada como descrição
+      // (acontece quando os dois nomes de coluna são parecidos, ex.:
+      // "Critério Principal" e "...Critério...").
+      const idxGrupo = encontrarColuna(candidatos, MAPA_COLUNAS.grupo, idxDescricao);
       return { linhaIndex: i, idxGrupo, idxDescricao, idxPontuacao };
     }
   }
 
   return null;
+}
+
+// Linhas de totalização (subtotal, total geral, etc.) que aparecem nas
+// matrizes, mas não são critérios avaliáveis de verdade.
+const PALAVRAS_LINHA_DE_TOTAL = ["subtotal", "total geral", "totais", "total"];
+
+function pareceLinhaDeTotal(descricao: string, grupo: string): boolean {
+  const d = normalizarCabecalho(descricao);
+  const g = normalizarCabecalho(grupo);
+  return PALAVRAS_LINHA_DE_TOTAL.some((p) => d === p || g === p);
 }
 
 export class MatrizImportError extends Error {}
@@ -95,7 +153,7 @@ export async function importarMatriz(arquivo: File): Promise<MatrizAvaliacao> {
   if (!cabecalho) {
     const primeirasLinhas = linhas
       .slice(0, Math.min(linhas.length, MAX_LINHAS_PARA_PROCURAR_CABECALHO))
-      .map((l, i) => `Linha ${i + 1}: ${(l as unknown[]).map((c) => String(c ?? "")).join(" | ")}`)
+      .map((l, i) => `Linha ${i + 1}: ${paraLinhaDeStrings(l as unknown[]).join(" | ")}`)
       .join("\n");
     throw new MatrizImportError(
       "Não encontrei uma linha com as colunas de critério e pontuação máxima " +
@@ -114,6 +172,8 @@ export async function importarMatriz(arquivo: File): Promise<MatrizAvaliacao> {
 
     const pontuacaoMaxima = Number(linha[idxPontuacao] ?? 0);
     const grupo = idxGrupo !== -1 ? String(linha[idxGrupo] ?? "").trim() : "Geral";
+
+    if (pareceLinhaDeTotal(descricao, grupo)) continue;
 
     criterios.push({
       id: `crit-${i}`,
