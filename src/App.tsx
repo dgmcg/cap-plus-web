@@ -8,7 +8,7 @@ import type {
 } from "./types";
 import { importarMatriz, MatrizImportError } from "./lib/matrixImport";
 import { dividirEmChunks, encerrarOcr, extrairTextoPDF } from "./lib/pdfExtract";
-import { gerarEmbedding, testarConexao } from "./lib/ollama";
+import { gerarEmbeddingComDivisao, testarConexao } from "./lib/ollama";
 import { salvarChunks } from "./lib/vectorStore";
 import { avaliarCriterios } from "./lib/avaliacaoEngine";
 import { baixarBlob, gerarRelatorioDocx } from "./lib/docxExport";
@@ -114,19 +114,24 @@ export default function App() {
         for (let i = 0; i < chunks.length; i++) {
           const c = chunks[i];
           try {
-            const embedding = await gerarEmbedding(cfg, c.texto);
-            chunksComEmbedding.push({
-              id: novoId(),
-              propostaId,
-              arquivoOrigem: arquivo.name,
-              pagina: c.pagina,
-              texto: c.texto,
-              embedding,
-            });
+            // Tenta gerar o embedding; se o trecho for grande demais pro
+            // contexto do modelo, essa função divide automaticamente e
+            // tenta de novo em pedaços menores, sem perder conteúdo.
+            const partes = await gerarEmbeddingComDivisao(cfg, c.texto);
+            for (const parte of partes) {
+              chunksComEmbedding.push({
+                id: novoId(),
+                propostaId,
+                arquivoOrigem: arquivo.name,
+                pagina: c.pagina,
+                texto: parte.texto,
+                embedding: parte.embedding,
+              });
+            }
           } catch (err) {
-            // Não aborta a indexação inteira por causa de um trecho
-            // problemático (ex.: texto grande demais para o modelo) — pula
-            // esse trecho específico e segue com o restante.
+            // Só chega aqui se nem dividindo repetidamente foi possível
+            // (extremamente raro) — aí sim esse pedaço específico é
+            // ignorado, para não travar a indexação inteira.
             trechosIgnorados++;
             console.warn(
               `Trecho ${i + 1} de ${arquivo.name} ignorado (erro ao gerar embedding):`,
@@ -144,7 +149,7 @@ export default function App() {
         if (trechosIgnorados > 0) {
           setProgressoIndexacao(
             `Atenção: ${trechosIgnorados} trecho(s) de ${arquivo.name} não puderam ` +
-              "ser indexados (provavelmente texto grande demais) e foram ignorados. " +
+              "ser indexados mesmo após tentativas de divisão, e foram ignorados. " +
               "A avaliação pode ficar incompleta para partes desse documento."
           );
         }
