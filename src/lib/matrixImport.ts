@@ -34,6 +34,43 @@ function encontrarColuna(
   return -1;
 }
 
+// Quantidade de linhas iniciais em que vamos procurar o cabeçalho de verdade.
+// Cobre planilhas que têm título, nome da unidade, linhas em branco, etc.
+// antes da linha com os nomes das colunas.
+const MAX_LINHAS_PARA_PROCURAR_CABECALHO = 15;
+
+interface CabecalhoEncontrado {
+  linhaIndex: number;
+  idxGrupo: number;
+  idxDescricao: number;
+  idxPontuacao: number;
+}
+
+/**
+ * Procura, entre as primeiras linhas da planilha, qual delas é o cabeçalho
+ * de verdade (a que tem as colunas de critério e pontuação máxima). Isso
+ * cobre o caso comum de planilhas institucionais que começam com uma linha
+ * de título (ex.: nome da unidade de saúde) antes do cabeçalho.
+ */
+function localizarCabecalho(linhas: unknown[][]): CabecalhoEncontrado | null {
+  const limite = Math.min(linhas.length, MAX_LINHAS_PARA_PROCURAR_CABECALHO);
+
+  for (let i = 0; i < limite; i++) {
+    const candidatos = (linhas[i] as unknown[]).map((c) => String(c ?? ""));
+    const idxDescricao = encontrarColuna(candidatos, MAPA_COLUNAS.descricao);
+    const idxPontuacao = encontrarColuna(candidatos, MAPA_COLUNAS.pontuacaoMaxima);
+
+    // Só consideramos que achamos o cabeçalho se AMBAS as colunas
+    // essenciais aparecerem na mesma linha.
+    if (idxDescricao !== -1 && idxPontuacao !== -1) {
+      const idxGrupo = encontrarColuna(candidatos, MAPA_COLUNAS.grupo);
+      return { linhaIndex: i, idxGrupo, idxDescricao, idxPontuacao };
+    }
+  }
+
+  return null;
+}
+
 export class MatrizImportError extends Error {}
 
 export async function importarMatriz(arquivo: File): Promise<MatrizAvaliacao> {
@@ -53,20 +90,24 @@ export async function importarMatriz(arquivo: File): Promise<MatrizAvaliacao> {
     );
   }
 
-  const cabecalhos = (linhas[0] as string[]).map((c) => String(c ?? ""));
-  const idxGrupo = encontrarColuna(cabecalhos, MAPA_COLUNAS.grupo);
-  const idxDescricao = encontrarColuna(cabecalhos, MAPA_COLUNAS.descricao);
-  const idxPontuacao = encontrarColuna(cabecalhos, MAPA_COLUNAS.pontuacaoMaxima);
+  const cabecalho = localizarCabecalho(linhas);
 
-  if (idxDescricao === -1 || idxPontuacao === -1) {
+  if (!cabecalho) {
+    const primeirasLinhas = linhas
+      .slice(0, Math.min(linhas.length, MAX_LINHAS_PARA_PROCURAR_CABECALHO))
+      .map((l, i) => `Linha ${i + 1}: ${(l as unknown[]).map((c) => String(c ?? "")).join(" | ")}`)
+      .join("\n");
     throw new MatrizImportError(
-      "Não encontrei as colunas de critério e/ou pontuação máxima na " +
-        "planilha. Colunas encontradas: " + cabecalhos.join(", ")
+      "Não encontrei uma linha com as colunas de critério e pontuação máxima " +
+        `nas primeiras ${MAX_LINHAS_PARA_PROCURAR_CABECALHO} linhas da planilha. ` +
+        "Conteúdo encontrado:\n" + primeirasLinhas
     );
   }
 
+  const { linhaIndex, idxGrupo, idxDescricao, idxPontuacao } = cabecalho;
+
   const criterios: CriterioAvaliacao[] = [];
-  for (let i = 1; i < linhas.length; i++) {
+  for (let i = linhaIndex + 1; i < linhas.length; i++) {
     const linha = linhas[i] as unknown[];
     const descricao = String(linha[idxDescricao] ?? "").trim();
     if (!descricao) continue;
