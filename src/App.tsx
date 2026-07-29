@@ -63,8 +63,11 @@ export default function App() {
 
   // Edital (opcional) — dividido em pedaços grandes e configuráveis, cada
   // um comparado com evidências buscadas na proposta (RAG), igual à
-  // avaliação por critério, só que com pedaços bem maiores.
+  // avaliação por critério, só que com pedaços bem maiores. Vários pedaços
+  // são agrupados numa mesma consulta à IA (tamanhoLoteEdital) pra reduzir
+  // ainda mais a quantidade de idas e vindas.
   const [tamanhoTrechoEdital, setTamanhoTrechoEdital] = useState(TAMANHO_PADRAO_TRECHO_EDITAL);
+  const [tamanhoLoteEdital, setTamanhoLoteEdital] = useState(4);
   const [trechosEdital, setTrechosEdital] = useState<TrechoEdital[]>([]);
   const [nomesArquivosEdital, setNomesArquivosEdital] = useState<string[]>([]);
   const [processandoEdital, setProcessandoEdital] = useState(false);
@@ -224,10 +227,12 @@ export default function App() {
       await encerrarOcr();
       setTrechosEdital(novosTrechos);
       setNomesArquivosEdital(novosNomes);
+      const totalConsultas = Math.ceil(novosTrechos.length / tamanhoLoteEdital);
       setProgressoEdital(
-        `Edital processado: ${novosTrechos.length} trecho(s) — ` +
-          `são ${novosTrechos.length} consultas sequenciais à IA durante a avaliação ` +
-          "(cada uma pode levar de alguns segundos a mais de um minuto, dependendo da máquina)."
+        `Edital processado: ${novosTrechos.length} trecho(s), agrupados de ` +
+          `${tamanhoLoteEdital} em ${tamanhoLoteEdital} — são aproximadamente ` +
+          `${totalConsultas} consulta(s) sequencial(is) à IA durante a avaliação ` +
+          "(cada uma pode levar de dezenas de segundos a alguns minutos, dependendo da máquina)."
       );
     } catch (err) {
       setProgressoEdital("Erro ao processar o Edital: " + (err as Error).message);
@@ -269,6 +274,7 @@ export default function App() {
         cfg,
         propostaId,
         trechosEdital,
+        tamanhoLoteEdital,
         (p) =>
           setProgressoAvaliacao(
             `Analisando convergência com o Edital — trecho ${p.itemAtual}/${p.totalItens}`
@@ -503,11 +509,23 @@ export default function App() {
                 onChange={(e) => setTamanhoTrechoEdital(Number(e.target.value))}
               />
             </label>
+            <label>
+              Quantos pedaços agrupar por consulta à IA
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={tamanhoLoteEdital}
+                onChange={(e) => setTamanhoLoteEdital(Number(e.target.value))}
+              />
+            </label>
             <p className="ajuda">
-              Pedaços maiores = menos consultas à IA (mais rápido no total), mas cada
-              consulta fica mais pesada. Pedaços menores = mais consultas, cada uma mais
-              leve. {tamanhoTrechoEdital.toLocaleString("pt-BR")} caracteres é o padrão;
-              ajuste conforme o tamanho do Edital e a velocidade do seu computador.
+              Agrupar mais pedaços por consulta = menos idas e vindas à IA (mais
+              rápido no total), mas cada consulta fica mais pesada e — em lotes muito
+              grandes — o modelo pode errar o formato da resposta com mais frequência
+              (o sistema reprocessa automaticamente item por item quando isso acontece,
+              então nada se perde, só fica mais lento nesses casos). {tamanhoLoteEdital}{" "}
+              é um valor equilibrado para começar.
             </p>
             <input
               type="file"
