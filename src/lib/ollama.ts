@@ -123,12 +123,15 @@ export async function chatCompletar(
   cfg: ConfiguracaoOllama,
   systemPrompt: string,
   userPrompt: string,
-  options?: { temperature?: number }
+  options?: { temperature?: number; numCtx?: number }
 ): Promise<RespostaChat> {
   const res = await ollamaFetch(cfg.baseUrl, "/api/chat", {
     model: cfg.modeloChat,
     stream: false,
-    options: { temperature: options?.temperature ?? 0.1 },
+    options: {
+      temperature: options?.temperature ?? 0.1,
+      ...(options?.numCtx ? { num_ctx: options.numCtx } : {}),
+    },
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },

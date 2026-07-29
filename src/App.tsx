@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import "./App.css";
 import type {
   AnaliseConvergenciaEdital,
@@ -28,6 +28,12 @@ const CONFIG_PADRAO: ConfiguracaoOllama = {
   modeloEmbedding: "nomic-embed-text",
 };
 
+// Tamanho padrão de cada pedaço do Edital (em caracteres) para a análise de
+// convergência. Bem maior que o usado nos trechos da proposta (~3.200),
+// de propósito — aqui a prioridade é ter poucos pedaços (poucas consultas
+// sequenciais à IA), não granularidade fina.
+const TAMANHO_PADRAO_TRECHO_EDITAL = 12000;
+
 function novoId() {
   return crypto.randomUUID();
 }
@@ -55,8 +61,10 @@ export default function App() {
   const [progressoIndexacao, setProgressoIndexacao] = useState("");
   const [prontoParaAvaliar, setProntoParaAvaliar] = useState(false);
 
-  // Edital (opcional) — usado só pra análise de convergência geral, não
-  // entra na busca de evidências por critério.
+  // Edital (opcional) — dividido em pedaços grandes e configuráveis, cada
+  // um comparado com evidências buscadas na proposta (RAG), igual à
+  // avaliação por critério, só que com pedaços bem maiores.
+  const [tamanhoTrechoEdital, setTamanhoTrechoEdital] = useState(TAMANHO_PADRAO_TRECHO_EDITAL);
   const [trechosEdital, setTrechosEdital] = useState<TrechoEdital[]>([]);
   const [nomesArquivosEdital, setNomesArquivosEdital] = useState<string[]>([]);
   const [processandoEdital, setProcessandoEdital] = useState(false);
@@ -65,6 +73,8 @@ export default function App() {
   const [progressoAvaliacao, setProgressoAvaliacao] = useState("");
   const [sessao, setSessao] = useState<SessaoAvaliacao | null>(null);
   const [convergencia, setConvergencia] = useState<AnaliseConvergenciaEdital | null>(null);
+  const canceladoRef = useRef(false);
+  const [cancelando, setCancelando] = useState(false);
 
   // Importação de uma avaliação já feita por outra pessoa (JSON) — permite
   // pular direto pra revisão, sem precisar de Ollama conectado.
@@ -204,7 +214,9 @@ export default function App() {
               `${p.etapa === "ocr" ? "OCR" : "lendo texto"} página ${p.paginaAtual}/${p.totalPaginas}`
           );
         });
-        const chunks = dividirEmChunks(paginas);
+        // Overlap proporcional (~8%) ao tamanho do pedaço escolhido.
+        const sobreposicao = Math.round(tamanhoTrechoEdital * 0.08);
+        const chunks = dividirEmChunks(paginas, tamanhoTrechoEdital, sobreposicao);
         for (const c of chunks) {
           novosTrechos.push({ arquivoOrigem: arquivo.name, pagina: c.pagina, texto: c.texto });
         }
@@ -213,7 +225,9 @@ export default function App() {
       setTrechosEdital(novosTrechos);
       setNomesArquivosEdital(novosNomes);
       setProgressoEdital(
-        `Edital processado: ${novosTrechos.length} trecho(s) prontos para análise de convergência.`
+        `Edital processado: ${novosTrechos.length} trecho(s) — ` +
+          `são ${novosTrechos.length} consultas sequenciais à IA durante a avaliação ` +
+          "(cada uma pode levar de alguns segundos a mais de um minuto, dependendo da máquina)."
       );
     } catch (err) {
       setProgressoEdital("Erro ao processar o Edital: " + (err as Error).message);
@@ -224,6 +238,8 @@ export default function App() {
 
   async function handleAvaliar() {
     if (!matriz) return;
+    canceladoRef.current = false;
+    setCancelando(false);
     setEtapa("avaliando");
 
     const avaliacoes: AvaliacaoCriterio[] = await avaliarCriterios(
@@ -233,7 +249,8 @@ export default function App() {
       (p) =>
         setProgressoAvaliacao(
           `Avaliando critérios — ${p.criterioAtual}/${p.totalCriterios}: ${p.descricaoCriterio}`
-        )
+        ),
+      () => canceladoRef.current
     );
 
     setSessao({
@@ -247,11 +264,16 @@ export default function App() {
       atualizadoEm: new Date().toISOString(),
     });
 
-    if (trechosEdital.length > 0) {
-      const itens = await analisarConvergenciaEdital(cfg, propostaId, trechosEdital, (p) =>
-        setProgressoAvaliacao(
-          `Analisando convergência com o Edital — trecho ${p.itemAtual}/${p.totalItens}`
-        )
+    if (trechosEdital.length > 0 && !canceladoRef.current) {
+      const itens = await analisarConvergenciaEdital(
+        cfg,
+        propostaId,
+        trechosEdital,
+        (p) =>
+          setProgressoAvaliacao(
+            `Analisando convergência com o Edital — trecho ${p.itemAtual}/${p.totalItens}`
+          ),
+        () => canceladoRef.current
       );
       setConvergencia({
         editalNomeArquivos: nomesArquivosEdital,
@@ -263,6 +285,11 @@ export default function App() {
     }
 
     setEtapa("revisao");
+  }
+
+  function handleCancelar() {
+    canceladoRef.current = true;
+    setCancelando(true);
   }
 
   function atualizarAvaliacao(criterioId: string, patch: Partial<AvaliacaoCriterio>) {
@@ -462,9 +489,25 @@ export default function App() {
           <section className="cartao" style={{ marginTop: 16 }}>
             <h2>3b. Edital (opcional) — análise de convergência</h2>
             <p className="ajuda">
-              Se anexar o Edital, a IA também vai varrer o texto dele e apontar, num
+              Se anexar o Edital, a IA varre o texto dele em pedaços e aponta, num
               âmbito geral, se a proposta está em conformidade ou se há
               inconsistências — separado da pontuação por critério da matriz.
+            </p>
+            <label>
+              Tamanho de cada pedaço do Edital (caracteres)
+              <input
+                type="number"
+                min={3000}
+                step={1000}
+                value={tamanhoTrechoEdital}
+                onChange={(e) => setTamanhoTrechoEdital(Number(e.target.value))}
+              />
+            </label>
+            <p className="ajuda">
+              Pedaços maiores = menos consultas à IA (mais rápido no total), mas cada
+              consulta fica mais pesada. Pedaços menores = mais consultas, cada uma mais
+              leve. {tamanhoTrechoEdital.toLocaleString("pt-BR")} caracteres é o padrão;
+              ajuste conforme o tamanho do Edital e a velocidade do seu computador.
             </p>
             <input
               type="file"
@@ -496,6 +539,14 @@ export default function App() {
         <section className="cartao">
           <h2>Avaliando...</h2>
           <p className="status-progresso">{progressoAvaliacao}</p>
+          {cancelando ? (
+            <p className="status-erro">
+              Cancelando após o item atual terminar — o que já foi avaliado não será
+              perdido.
+            </p>
+          ) : (
+            <button onClick={handleCancelar}>Cancelar</button>
+          )}
         </section>
       )}
 

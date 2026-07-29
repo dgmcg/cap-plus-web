@@ -61,7 +61,7 @@ function construirSecaoConvergencia(convergencia: AnaliseConvergenciaEdital): Pa
       heading: HeadingLevel.HEADING_1,
     }),
     paragrafo(
-      "Verificação automática, em âmbito geral, de aderência da proposta ao que o " +
+      "Verificação automática, em blocos do Edital, de aderência da proposta ao que o " +
         `Edital (${convergencia.editalNomeArquivos.join(", ")}) exige — não substitui ` +
         "a avaliação por critério da matriz, é uma checagem complementar de " +
         "consistência. Revise cada apontamento antes de considerá-lo definitivo."
@@ -75,9 +75,9 @@ function construirSecaoConvergencia(convergencia: AnaliseConvergenciaEdital): Pa
 
   paragrafos.push(
     paragrafo(
-      `Resumo: ${convergentes.length} trecho(s) convergente(s), ` +
+      `Resumo: ${convergentes.length} bloco(s) convergente(s), ` +
         `${inconsistentes.length} inconsistência(s) apontada(s), ` +
-        `${naoVerificaveis.length} trecho(s) não verificável(is).`
+        `${naoVerificaveis.length} bloco(s) não verificável(is).`
     ),
     new Paragraph({ text: "" })
   );

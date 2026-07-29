@@ -72,11 +72,14 @@ export async function avaliarCriterios(
   cfg: ConfiguracaoOllama,
   propostaId: string,
   criterios: CriterioAvaliacao[],
-  onProgresso?: (p: ProgressoAvaliacao) => void
+  onProgresso?: (p: ProgressoAvaliacao) => void,
+  deveCancelar?: () => boolean
 ): Promise<AvaliacaoCriterio[]> {
   const resultados: AvaliacaoCriterio[] = [];
 
   for (let i = 0; i < criterios.length; i++) {
+    if (deveCancelar?.()) break;
+
     const criterio = criterios[i];
     onProgresso?.({
       criterioAtual: i + 1,
